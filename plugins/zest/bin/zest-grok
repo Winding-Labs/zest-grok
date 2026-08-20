@@ -1,0 +1,14 @@
+#!/bin/sh
+# Platform-dispatch wrapper — detects OS/arch and execs the compiled binary.
+DIR="$(cd "$(dirname "$0")" && pwd)"
+OS=$(uname -s)
+ARCH=$(uname -m)
+
+case "${OS}-${ARCH}" in
+  Darwin-arm64)          exec "$DIR/zest-grok-darwin-arm64" "$@" ;;
+  Darwin-x86_64)         exec "$DIR/zest-grok-darwin-x64" "$@" ;;
+  Linux-x86_64)          exec "$DIR/zest-grok-linux-x64" "$@" ;;
+  Linux-aarch64)         exec "$DIR/zest-grok-linux-arm64" "$@" ;;
+  MINGW*|MSYS*|CYGWIN*)  exec "$DIR/zest-grok-win-x64.exe" "$@" ;;
+  *)                     echo "Zest: unsupported platform ${OS}-${ARCH}" >&2; exit 1 ;;
+esac

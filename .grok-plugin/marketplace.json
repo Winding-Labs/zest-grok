@@ -1,0 +1,27 @@
+{
+  "name": "zest-grok",
+  "description": "Official Zest plugin for Grok Build",
+  "owner": {
+    "name": "Zest",
+    "url": "https://meetzest.com"
+  },
+  "plugins": [
+    {
+      "name": "zest",
+      "version": "0.1.2",
+      "description": "Zest for Grok Build — track sessions for standups and workflow insights",
+      "category": "productivity",
+      "homepage": "https://meetzest.com",
+      "keywords": [
+        "zest"
+      ],
+      "domains": [
+        "meetzest.com"
+      ],
+      "source": {
+        "type": "local",
+        "path": "./plugins/zest"
+      }
+    }
+  ]
+}
