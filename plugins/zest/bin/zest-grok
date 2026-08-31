@@ -1,14 +1,322 @@
 #!/bin/sh
-# Platform-dispatch wrapper — detects OS/arch and execs the compiled binary.
+set -eu
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ── Platform detection ──────────────────────────────────────────────
 OS=$(uname -s)
 ARCH=$(uname -m)
 
 case "${OS}-${ARCH}" in
-  Darwin-arm64)          exec "$DIR/zest-grok-darwin-arm64" "$@" ;;
-  Darwin-x86_64)         exec "$DIR/zest-grok-darwin-x64" "$@" ;;
-  Linux-x86_64)          exec "$DIR/zest-grok-linux-x64" "$@" ;;
-  Linux-aarch64)         exec "$DIR/zest-grok-linux-arm64" "$@" ;;
-  MINGW*|MSYS*|CYGWIN*)  exec "$DIR/zest-grok-win-x64.exe" "$@" ;;
-  *)                     echo "Zest: unsupported platform ${OS}-${ARCH}" >&2; exit 1 ;;
+  Darwin-arm64)    PLATFORM="darwin-arm64";  BIN_NAME="zest-grok-darwin-arm64" ;;
+  Darwin-x86_64)   PLATFORM="darwin-x64";    BIN_NAME="zest-grok-darwin-x64" ;;
+  Linux-x86_64)    PLATFORM="linux-x64";     BIN_NAME="zest-grok-linux-x64" ;;
+  Linux-aarch64)   PLATFORM="linux-arm64";   BIN_NAME="zest-grok-linux-arm64" ;;
+  MINGW*|MSYS*|CYGWIN*)
+    # On Windows the .cmd launcher handles download natively.
+    # Hand off so we don't try to gunzip a .zip asset.
+    CMD="$DIR/zest-grok.cmd"
+    if [ -f "$CMD" ]; then
+      exec "$CMD" "$@"
+    fi
+    echo "Zest: zest-grok.cmd not found — reinstall plugin" >&2; exit 1 ;;
+  *)
+    echo "Zest: unsupported platform ${OS}-${ARCH}" >&2; exit 1 ;;
 esac
+
+# ── Escape hatch ────────────────────────────────────────────────────
+if [ -n "${ZEST_BINARY_PATH:-}" ]; then
+  exec "$ZEST_BINARY_PATH" "$@"
+fi
+
+# ── Read manifest (pinned format, one key per line) ─────────────────
+MANIFEST="$DIR/manifest.json"
+if [ ! -f "$MANIFEST" ]; then
+  echo "Zest: manifest.json missing — reinstall plugin" >&2
+  exit 1
+fi
+
+manifest_value() {
+  sed -n "s/^[[:space:]]*\"$1\":[[:space:]]*\"\{0,1\}\([^\",$]*\)\"\{0,1\},\{0,1\}$/\1/p" "$MANIFEST" | head -1
+}
+
+# Top-level fields
+VERSION=$(manifest_value "version")
+REPO=$(manifest_value "repo")
+
+# Per-platform fields: extract the block for our platform, then read keys
+platform_value() {
+  sed -n "/\"${PLATFORM}\":/,/}/p" "$MANIFEST" | sed -n "s/^[[:space:]]*\"$1\":[[:space:]]*\"\{0,1\}\([^\",$]*\)\"\{0,1\},\{0,1\}$/\1/p" | head -1
+}
+
+ASSET_FILE=$(platform_value "file")
+EXPECTED_SHA=$(platform_value "sha256")
+COMPRESSED_SIZE=$(platform_value "compressed_size")
+
+if [ -z "$VERSION" ] || [ -z "$ASSET_FILE" ] || [ -z "$EXPECTED_SHA" ]; then
+  echo "Zest: cannot parse manifest.json for ${PLATFORM}" >&2
+  exit 1
+fi
+
+# ── Cache check ─────────────────────────────────────────────────────
+CACHE_BASE="${HOME}/.zest/bin/grok"
+CACHE_DIR="${CACHE_BASE}/${VERSION}"
+CACHED_BIN="${CACHE_DIR}/${BIN_NAME}"
+
+if [ -x "$CACHED_BIN" ]; then
+  unset ZEST_PINNED_VERSION
+  export ZEST_PLUGIN_ROOT="$(dirname "$DIR")"
+  exec "$CACHED_BIN" "$@"
+fi
+
+# ── Semver comparison ──────────────────────────────────────────────
+# Returns 0 (true) if $1 > $2 by numeric component comparison.
+# Skips non-version directory names (anything with a non-digit/dot char).
+ver_gt() {
+  case "$1" in *[!0-9.]*) return 1 ;; esac
+  case "$2" in *[!0-9.]*) return 1 ;; esac
+  IFS=. read -r a1 a2 a3 <<EOF
+$1
+EOF
+  IFS=. read -r b1 b2 b3 <<EOF
+$2
+EOF
+  a1=${a1:-0}; a2=${a2:-0}; a3=${a3:-0}
+  b1=${b1:-0}; b2=${b2:-0}; b3=${b3:-0}
+  [ "$a1" -gt "$b1" ] 2>/dev/null && return 0
+  [ "$a1" -lt "$b1" ] 2>/dev/null && return 1
+  [ "$a2" -gt "$b2" ] 2>/dev/null && return 0
+  [ "$a2" -lt "$b2" ] 2>/dev/null && return 1
+  [ "$a3" -gt "$b3" ] 2>/dev/null && return 0
+  return 1
+}
+
+# ── Download allowlist ──────────────────────────────────────────────
+# Only interactive commands may trigger a download. Non-interactive
+# verbs (hook, daemon) fall back to the newest OTHER cached version so
+# capture continues on N-1 after a plugin update until the user runs
+# an interactive command that fetches the pinned version.
+VERB="${1:-}"
+
+# Find the newest cached binary that is NOT the pinned version.
+find_fallback_binary() {
+  BEST_VER=""
+  BEST_PATH=""
+  for dpath in "${CACHE_BASE}"/*/; do
+    [ -d "$dpath" ] || continue
+    d=$(basename "$dpath")
+    [ "$d" = "$VERSION" ] && continue
+    case "$d" in *[!0-9.]*) continue ;; esac
+    CANDIDATE="${dpath}${BIN_NAME}"
+    if [ -x "$CANDIDATE" ]; then
+      if [ -z "$BEST_VER" ] || ver_gt "$d" "$BEST_VER"; then
+        BEST_VER="$d"
+        BEST_PATH="$CANDIDATE"
+      fi
+    fi
+  done
+  [ -n "$BEST_PATH" ] && echo "$BEST_PATH" && return 0
+  return 1
+}
+
+# Try cached or sibling binary as degraded fallback, exec if found, return 1 if none.
+# Exports ZEST_PINNED_VERSION so the running binary knows it is NOT the pinned version.
+try_fallback_exec() {
+  FALLBACK_BIN=$(find_fallback_binary) && {
+    export ZEST_PINNED_VERSION="$VERSION"
+    export ZEST_PLUGIN_ROOT="$(dirname "$DIR")"
+    exec "$FALLBACK_BIN" "$@"
+  }
+  # Sibling-version fallback: one-release bridge for hosts transitioning
+  # from tip-binary to release-binary. Scans sibling plugin-version dirs
+  # for a binary with exact name $BIN_NAME. No sha256 — warrant is same
+  # trust path (git clone of our mirror). Claude Code retains ~3 recent
+  # plugin versions and prunes older ones within a day; sibling fallback
+  # therefore bridges ~3 releases. Remove after all clients ship release-binary.
+  # Use find (not an unquoted glob) so plugin cache paths with spaces survive.
+  SIBLING_GLOB=""
+  if [ -n "$SIBLING_GLOB" ]; then
+    BEST_SIBLING=""
+    BEST_SIBLING_VER=""
+    cache_root=$(CDPATH= cd "$DIR/../.." && pwd) || cache_root=""
+    if [ -n "$cache_root" ]; then
+      while IFS= read -r sibling; do
+        [ -x "$sibling" ] || continue
+        sver=$(basename "$(dirname "$(dirname "$sibling")")")
+        case "$sver" in *[!0-9.]*) continue ;; esac
+        if [ -z "$BEST_SIBLING_VER" ] || ver_gt "$sver" "$BEST_SIBLING_VER"; then
+          BEST_SIBLING_VER="$sver"
+          BEST_SIBLING="$sibling"
+        fi
+      done <<EOF
+$(find "$cache_root" -maxdepth 3 -type f -name "$BIN_NAME" 2>/dev/null)
+EOF
+    fi
+    if [ -n "$BEST_SIBLING" ]; then
+      export ZEST_PINNED_VERSION="$VERSION"
+      export ZEST_PLUGIN_ROOT="$(dirname "$DIR")"
+      exec "$BEST_SIBLING" "$@"
+    fi
+  fi
+  return 1
+}
+
+case "$VERB" in
+  command) ;; # proceed to download
+  *)
+    try_fallback_exec "$@" || {
+      echo '{"status":"binary_not_cached","version":"'"$VERSION"'"}' >&2
+      case "$VERB" in daemon) exit 1 ;; *) exit 0 ;; esac
+    }
+    ;;
+esac
+
+# ── Download with locking ───────────────────────────────────────────
+LOCK_DIR="${CACHE_DIR}/.download-lock"
+LOCK_HELD=false
+
+cleanup() {
+  rm -f "${CACHE_DIR}/.download.$$" "${CACHE_DIR}/.bin.$$" 2>/dev/null || true
+  rm -rf "${CACHE_DIR}/.extract.$$" 2>/dev/null || true
+  if [ "$LOCK_HELD" = true ] && [ -f "$LOCK_DIR/pid" ]; then
+    LOCK_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
+    if [ "$LOCK_PID" = "$$" ]; then
+      rm -rf "$LOCK_DIR" 2>/dev/null || true
+    fi
+  fi
+}
+trap cleanup EXIT INT TERM
+
+# try_fallback_exec ends in exec, which replaces this process and skips the
+# EXIT trap — the lock dir would survive holding a PID that is still alive
+# (exec keeps the PID), so the stale-lock reaper would never reclaim it.
+# Release explicitly before handing off.
+release_before_fallback() {
+  cleanup
+  trap - EXIT INT TERM
+}
+
+mkdir -p "$CACHE_DIR"
+
+# Acquire lock (mkdir is atomic)
+LOCK_TRIES=0
+MAX_LOCK_WAIT=120
+while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+  LOCK_TRIES=$((LOCK_TRIES + 1))
+  if [ "$LOCK_TRIES" -ge "$MAX_LOCK_WAIT" ]; then
+    echo "Zest: timed out waiting for download lock" >&2
+    try_fallback_exec "$@" || exit 1
+  fi
+  # Check if holding PID is alive
+  if [ -f "$LOCK_DIR/pid" ]; then
+    LOCK_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
+    if [ -n "$LOCK_PID" ] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+      rm -rf "$LOCK_DIR" 2>/dev/null || true
+      continue
+    fi
+  fi
+  sleep 1
+done
+echo $$ > "$LOCK_DIR/pid"
+LOCK_HELD=true
+
+# Re-check cache (another process may have finished)
+if [ -x "$CACHED_BIN" ]; then
+  rm -rf "$LOCK_DIR" 2>/dev/null || true
+  LOCK_HELD=false
+  trap - EXIT INT TERM
+  unset ZEST_PINNED_VERSION
+  export ZEST_PLUGIN_ROOT="$(dirname "$DIR")"
+  exec "$CACHED_BIN" "$@"
+fi
+
+# ── Download ────────────────────────────────────────────────────────
+# ZEST_DOWNLOAD_BASE_URL: override for air-gapped or locked-down environments.
+# Point it at any HTTP server that hosts the release assets at the root, e.g.
+#   ZEST_DOWNLOAD_BASE_URL=http://internal-mirror:8080
+# downloads from http://internal-mirror:8080/zest-grok-darwin-arm64.gz
+if [ -n "${ZEST_DOWNLOAD_BASE_URL:-}" ]; then
+  URL="${ZEST_DOWNLOAD_BASE_URL}/${ASSET_FILE}"
+else
+  URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ASSET_FILE}"
+fi
+DOWNLOAD_MB=""
+if [ -n "$COMPRESSED_SIZE" ]; then
+  DOWNLOAD_MB=$(( COMPRESSED_SIZE / 1048576 ))
+  [ "$DOWNLOAD_MB" -lt 1 ] && DOWNLOAD_MB=1
+fi
+echo "Zest: downloading runtime v${VERSION} (${DOWNLOAD_MB:-?} MB, one time)"
+
+TEMP_DL="${CACHE_DIR}/.download.$$"
+if ! curl -fsSL --retry 2 --retry-delay 2 --connect-timeout 10 --max-time 300 -o "$TEMP_DL" "$URL"; then
+  echo "Zest: download failed. Check network or set ZEST_BINARY_PATH for manual install." >&2
+  release_before_fallback
+  try_fallback_exec "$@" || exit 1
+fi
+
+# ── Decompress ──────────────────────────────────────────────────────
+TEMP_BIN="${CACHE_DIR}/.bin.$$"
+if ! gunzip -c "$TEMP_DL" > "$TEMP_BIN"; then
+  echo "Zest: decompression failed" >&2
+  release_before_fallback
+  try_fallback_exec "$@" || exit 1
+fi
+rm -f "$TEMP_DL"
+
+# ── Verify SHA256 ───────────────────────────────────────────────────
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL_SHA=$(sha256sum "$TEMP_BIN" | cut -d' ' -f1)
+elif command -v shasum >/dev/null 2>&1; then
+  ACTUAL_SHA=$(shasum -a 256 "$TEMP_BIN" | cut -d' ' -f1)
+else
+  echo "Zest: no sha256 tool available. Set ZEST_BINARY_PATH for manual install." >&2
+  rm -f "$TEMP_BIN"
+  release_before_fallback
+  try_fallback_exec "$@" || exit 1
+fi
+
+if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+  echo "Zest: integrity check failed" >&2
+  echo "  expected: $EXPECTED_SHA" >&2
+  echo "  actual:   $ACTUAL_SHA" >&2
+  rm -f "$TEMP_BIN"
+  release_before_fallback
+  try_fallback_exec "$@" || exit 1
+fi
+
+# ── Atomic rename ───────────────────────────────────────────────────
+mv "$TEMP_BIN" "$CACHED_BIN"
+chmod +x "$CACHED_BIN"
+
+# ── GC (best-effort) ───────────────────────────────────────────────
+# Keep the pinned version (just downloaded) and the newest other version
+# (fallback for hooks/daemon after a future update). Remove the rest.
+(
+  NEWEST_VER=""
+  NEWEST_PATH=""
+  for dpath in "${CACHE_BASE}"/*/; do
+    [ -d "$dpath" ] || continue
+    d=$(basename "$dpath")
+    [ "$d" = "$VERSION" ] && continue
+    case "$d" in *[!0-9.]*) continue ;; esac
+    if [ -z "$NEWEST_VER" ] || ver_gt "$d" "$NEWEST_VER"; then
+      NEWEST_VER="$d"
+      NEWEST_PATH="$dpath"
+    fi
+  done
+  for dpath in "${CACHE_BASE}"/*/; do
+    [ -d "$dpath" ] || continue
+    d=$(basename "$dpath")
+    [ "$d" = "$VERSION" ] && continue
+    [ "$dpath" = "$NEWEST_PATH" ] && continue
+    rm -rf "${dpath}" 2>/dev/null || true
+  done
+) 2>/dev/null || true
+
+# ── Release lock & exec ────────────────────────────────────────────
+rm -rf "$LOCK_DIR" 2>/dev/null || true
+LOCK_HELD=false
+trap - EXIT INT TERM
+unset ZEST_PINNED_VERSION
+export ZEST_PLUGIN_ROOT="$(dirname "$DIR")"
+exec "$CACHED_BIN" "$@"

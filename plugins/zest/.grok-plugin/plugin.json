@@ -1,15 +1,19 @@
 {
   "name": "zest",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Zest for Grok Build — track sessions for standups and workflow insights",
   "author": {
     "name": "Zest",
     "url": "https://meetzest.com"
   },
-  "homepage": "https://meetzest.com",
+  "homepage": "https://app.meetzest.com/docs/install/grok-build",
   "repository": "https://github.com/Winding-Labs/zest-grok",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE.md",
   "keywords": [
-    "zest"
+    "grok",
+    "productivity",
+    "analytics",
+    "sessions",
+    "standup"
   ]
 }
