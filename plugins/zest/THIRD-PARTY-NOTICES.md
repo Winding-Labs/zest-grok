@@ -4,7 +4,7 @@ This file lists the open-source components included in this distribution,
 their licenses, and copyright notices. It is generated automatically from
 the project's production dependency tree.
 
-Generated: 2026-08-31
+Generated: 2026-10-09
 Packages: 5
 
 ---
