@@ -1,36 +1,36 @@
 {
-  "version": "0.1.4",
+  "version": "0.1.5",
   "repo": "Winding-Labs/zest-grok",
   "assets": {
     "darwin-arm64": {
-      "compressed_size": 25737104,
+      "compressed_size": 25738384,
       "file": "zest-grok-darwin-arm64.gz",
-      "sha256": "9b41ca86596d5ee0abd174545e650d16c62ef0ea25badb8a77411bec07b422df",
-      "size": 63168114
+      "sha256": "dfe7226b74a848d2c38340302c1938c06e06491f72cbe435a3efab9f5e24db2f",
+      "size": 63184626
     },
     "darwin-x64": {
-      "compressed_size": 28431075,
+      "compressed_size": 28431996,
       "file": "zest-grok-darwin-x64.gz",
-      "sha256": "cb5f3bdca695b0784facd6e0252124854c04d4a403f226a63adea81debc9324b",
-      "size": 70267152
+      "sha256": "05c05677963737b5a400e136a2e34e631172a9a46580806b4fa1767f9a41af6e",
+      "size": 70283536
     },
     "linux-arm64": {
-      "compressed_size": 36525939,
+      "compressed_size": 36526782,
       "file": "zest-grok-linux-arm64.gz",
-      "sha256": "898e8208af3012b14708e202b9a9a16bd84d7157d648f99f710db010b3b5042d",
+      "sha256": "2c001c475db3ce2c4f0ce94b779235bb5d58bcd53af39c756562218a3f1be947",
       "size": 82233640
     },
     "linux-x64": {
-      "compressed_size": 36615471,
+      "compressed_size": 36616331,
       "file": "zest-grok-linux-x64.gz",
-      "sha256": "d5b6477c4833aa3d42dbc7b3d59509d9cae9c038142938ae7f151b299d70e3f2",
-      "size": 82261472
+      "sha256": "7082ea85f6f312d5269dd966347a099c14de57b517b9661f0127cca80372d470",
+      "size": 82265568
     },
     "win-x64": {
-      "compressed_size": 39864654,
+      "compressed_size": 39865611,
       "file": "zest-grok-win-x64.exe.zip",
-      "sha256": "2d853abe6342ecaff9ec332808a74ae2653affef3ae8d9d7e93f73c84d44296c",
-      "size": 87034880
+      "sha256": "418d02ff084d9341113ef43e39b0c476f1d50da951eb6aed03bdf08f83dc3526",
+      "size": 87038464
     }
   }
 }
