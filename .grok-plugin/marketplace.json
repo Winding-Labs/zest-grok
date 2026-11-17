@@ -8,10 +8,10 @@
   "plugins": [
     {
       "name": "zest",
-      "version": "0.2.0",
+      "version": "2.0.0",
       "description": "Zest for Grok Build — track sessions for standups and workflow insights",
       "category": "productivity",
-      "homepage": "https://app.meetzest.com/docs/install/grok-build",
+      "homepage": "https://meetzest.com/docs/plugins/grok-build/",
       "keywords": [
         "grok",
         "productivity",

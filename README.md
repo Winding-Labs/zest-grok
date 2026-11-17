@@ -10,7 +10,7 @@ analytics, and a picture of how your team actually works across every AI tool.
 
 Then run `/zest-login` inside a Grok session.
 
-Full instructions: https://app.meetzest.com/docs/install/grok-build
+Full instructions: https://meetzest.com/docs/plugins/grok-build/
 
 ## What it captures
 
@@ -74,4 +74,4 @@ mirror and is regenerated on every release.
 Proprietary — see LICENSE.md. Third-party components included in this
 distribution are listed in THIRD-PARTY-NOTICES.md.
 
-Questions: hi@winding.ai
+Questions: support@winding.ai

@@ -42,7 +42,10 @@ set "CACHE_BASE=%USERPROFILE%\.zest\bin\grok"
 set "CACHE_DIR=%CACHE_BASE%\%VERSION%"
 set "CACHED_BIN=%CACHE_DIR%\%BIN_NAME%"
 
-if exist "%CACHED_BIN%" goto :exec_cached
+rem ── Every binary is re-hashed right before it runs, not only after a download: a cached, fallback
+rem or sibling binary that does not match its manifest's sha256 never runs.
+call :verify_cached
+if defined CACHED_OK goto :exec_cached
 
 rem ── Download allowlist with fallback to previous cached version
 set "VERB=%~1"
@@ -99,17 +102,26 @@ rem right away, so record its parent: the cmd.exe running this script.
 powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-CimInstance Win32_Process -Filter ('ProcessId=' + $PID)).ParentProcessId" > "%LOCK_DIR%\pid"
 
 rem Re-check cache
-if exist "%CACHED_BIN%" (
+call :verify_cached
+if defined CACHED_OK (
   rmdir /s /q "%LOCK_DIR%" 2>nul
   goto :exec_cached
 )
 
-rem ── Download (ZEST_DOWNLOAD_BASE_URL overrides for air-gapped setups)
-if defined ZEST_DOWNLOAD_BASE_URL (
-  set "URL=%ZEST_DOWNLOAD_BASE_URL%/%ASSET_FILE%"
-) else (
-  set "URL=https://github.com/%REPO%/releases/download/v%VERSION%/%ASSET_FILE%"
+rem ── Download (ZEST_DOWNLOAD_BASE_URL overrides for air-gapped setups; https only, since plain http
+rem would open both the binary and its sha256 check to the network)
+if not defined ZEST_DOWNLOAD_BASE_URL goto :default_url
+set "URL_SCHEME=%ZEST_DOWNLOAD_BASE_URL:~0,8%"
+if /i not "%URL_SCHEME%"=="https://" (
+  echo Zest: ZEST_DOWNLOAD_BASE_URL must start with https:// >&2
+  rmdir /s /q "%LOCK_DIR%" 2>nul
+  goto :fail_fallback
 )
+set "URL=%ZEST_DOWNLOAD_BASE_URL%/%ASSET_FILE%"
+goto :have_url
+:default_url
+set "URL=https://github.com/%REPO%/releases/download/v%VERSION%/%ASSET_FILE%"
+:have_url
 set /a "DL_MB=%COMPRESSED_SIZE% / 1048576"
 if %DL_MB% lss 1 set "DL_MB=1"
 echo Zest: downloading runtime v%VERSION% (%DL_MB% MB, one time)
@@ -117,7 +129,8 @@ echo Zest: downloading runtime v%VERSION% (%DL_MB% MB, one time)
 rem Expand-Archive on PowerShell 5.1 rejects any path that does not end in .zip.
 set "TEMP_DL=%CACHE_DIR%\.download.%RANDOM%.zip"
 rem The TLS 1.2 opt-in is blocked in ConstrainedLanguage mode; downloads still work there without it.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}; try { Invoke-WebRequest -Uri '%URL%' -OutFile '%TEMP_DL%' -TimeoutSec 300 -UseBasicParsing } catch { Write-Error $_.Exception.Message; exit 1 }"
+rem URL and TEMP_DL go through the env, so a ' in the profile path (C:\Users\O'Brien) needs no escaping.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}; try { Invoke-WebRequest -Uri $env:URL -OutFile $env:TEMP_DL -TimeoutSec 300 -UseBasicParsing } catch { Write-Error $_.Exception.Message; exit 1 }"
 if errorlevel 1 (
   echo Zest: download failed. Check network or set ZEST_BINARY_PATH for manual install. >&2
   del /f /q "%TEMP_DL%" 2>nul
@@ -154,22 +167,20 @@ if not exist "%TEMP_BIN%" (
 )
 
 rem ── Verify SHA256 (on temp binary, before it reaches the final path)
-for /f "usebackq skip=1 delims=" %%H in (`certutil -hashfile "%TEMP_BIN%" SHA256`) do (
-  if not defined ACTUAL_SHA set "ACTUAL_SHA=%%H"
-)
-set "ACTUAL_SHA=%ACTUAL_SHA: =%"
-if /i not "%ACTUAL_SHA%"=="%EXPECTED_SHA%" (
+call :sha_ok "%TEMP_BIN%" "%EXPECTED_SHA%"
+if not defined SHA_OK (
   echo Zest: integrity check failed >&2
   echo   expected: %EXPECTED_SHA% >&2
-  echo   actual:   %ACTUAL_SHA% >&2
+  echo   actual:   %FILE_SHA% >&2
   rmdir /s /q "%EXTRACT_DIR%" 2>nul
   rmdir /s /q "%LOCK_DIR%" 2>nul
   goto :fail_fallback
 )
 
-rem ── Atomic move to final path
+rem ── Atomic move to final path (the exec below runs this same file, hashed just above)
 move /Y "%TEMP_BIN%" "%CACHED_BIN%" >nul
 rmdir /s /q "%EXTRACT_DIR%" 2>nul
+call :remember_sha "%CACHED_BIN%" "%EXPECTED_SHA%"
 
 rem ── GC: keep pinned version + newest other (fallback for hooks after update)
 set "BEST_VER=0.0.0"
@@ -205,7 +216,7 @@ set "SIBLING_GLOB="
 if not defined SIBLING_GLOB exit /b 0
 set "BEST_VER=0.0.0"
 for /f "delims=" %%D in ('dir /b /ad "%DIR%..\.." 2^>nul') do (
-  if exist "%DIR%..\..\%%D\bin\%BIN_NAME%" call :keep_newer %%D
+  if exist "%DIR%..\..\%%D\bin\%BIN_NAME%" call :consider_sibling %%D
 )
 if "%BEST_VER%"=="0.0.0" exit /b 0
 set "FALLBACK_BIN=%DIR%..\..\%BEST_VER%\bin\%BIN_NAME%"
@@ -222,10 +233,79 @@ set "FALLBACK_BIN="
 set "BEST_VER=0.0.0"
 for /f "delims=" %%D in ('dir /b /ad "%CACHE_BASE%" 2^>nul') do (
   if /i not "%%D"=="%VERSION%" (
-    if exist "%CACHE_BASE%\%%D\%BIN_NAME%" call :keep_newer %%D
+    if exist "%CACHE_BASE%\%%D\%BIN_NAME%" call :consider_cached %%D
   )
 )
 if not "%BEST_VER%"=="0.0.0" set "FALLBACK_BIN=%CACHE_BASE%\%BEST_VER%\%BIN_NAME%"
+exit /b 0
+
+rem ── Subroutine: keep cached version %1 as the fallback if it is newer and matches the hash its
+rem manifest gave (remembered beside it, else the manifest of that version in a sibling plugin folder)
+:consider_cached
+call :ver_gt %1 %BEST_VER%
+if %VER_RESULT% neq 1 exit /b 0
+set "CANDIDATE=%CACHE_BASE%\%~1\%BIN_NAME%"
+set "EXP_SHA="
+if exist "%CANDIDATE%.sha256" (set /p EXP_SHA=<"%CANDIDATE%.sha256") else call :manifest_sha "%DIR%..\..\%~1\bin\manifest.json" %1
+call :sha_ok "%CANDIDATE%" "%EXP_SHA%"
+if defined SHA_OK set "BEST_VER=%~1"
+exit /b 0
+
+rem ── Subroutine: keep sibling plugin version %1 if it is newer and its binary matches the
+rem manifest.json beside it (none or no match: skipped)
+:consider_sibling
+call :ver_gt %1 %BEST_VER%
+if %VER_RESULT% neq 1 exit /b 0
+call :manifest_sha "%DIR%..\..\%~1\bin\manifest.json"
+call :sha_ok "%DIR%..\..\%~1\bin\%BIN_NAME%" "%EXP_SHA%"
+if defined SHA_OK set "BEST_VER=%~1"
+exit /b 0
+
+rem ── Subroutine: CACHED_OK=1 when the pinned binary is cached and matches the manifest. One that
+rem does not match is removed, so the rest of the script downloads or falls back.
+:verify_cached
+set "CACHED_OK="
+if not exist "%CACHED_BIN%" exit /b 0
+call :sha_ok "%CACHED_BIN%" "%EXPECTED_SHA%"
+if defined SHA_OK (
+  set "CACHED_OK=1"
+  call :remember_sha "%CACHED_BIN%" "%EXPECTED_SHA%"
+  exit /b 0
+)
+echo Zest: cached runtime v%VERSION% failed its integrity check; removing it >&2
+del /f /q "%CACHED_BIN%" "%CACHED_BIN%.sha256" 2>nul
+exit /b 0
+
+rem ── Subroutine: SHA_OK=1 when file %1 has sha256 %2 (both required); FILE_SHA is its hash
+:sha_ok
+set "SHA_OK="
+set "FILE_SHA="
+if "%~2"=="" exit /b 0
+if not exist "%~1" exit /b 0
+for /f "usebackq skip=1 delims=" %%H in (`certutil -hashfile "%~1" SHA256`) do (
+  if not defined FILE_SHA set "FILE_SHA=%%H"
+)
+if not defined FILE_SHA exit /b 0
+set "FILE_SHA=%FILE_SHA: =%"
+if /i "%FILE_SHA%"=="%~2" set "SHA_OK=1"
+exit /b 0
+
+rem ── Subroutine: remember sha256 %2 beside binary %1 (%1.sha256), so it can still be checked once
+rem a plugin update makes it the fallback and its manifest is gone
+:remember_sha
+set "SAVED_SHA="
+if exist "%~1.sha256" set /p SAVED_SHA=<"%~1.sha256"
+if /i not "%SAVED_SHA%"=="%~2" (>"%~1.sha256" echo %~2) 2>nul
+exit /b 0
+
+rem ── Subroutine: EXP_SHA = the win-x64 sha256 in manifest %1; with %2, only when its version is %2.
+rem Paths go through the env, as for the plugin's own manifest.
+:manifest_sha
+set "EXP_SHA="
+if not exist "%~1" exit /b 0
+set "SHA_MANIFEST=%~1"
+set "SHA_VERSION=%~2"
+for /f "usebackq delims=" %%S in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$m = ConvertFrom-Json -InputObject (Get-Content -LiteralPath $env:SHA_MANIFEST -Raw); if (-not $env:SHA_VERSION -or $m.version -eq $env:SHA_VERSION) { $m.assets.'win-x64'.sha256 }"`) do set "EXP_SHA=%%S"
 exit /b 0
 
 rem ── Subroutine: set BEST_VER=%1 if %1 is a newer version than BEST_VER

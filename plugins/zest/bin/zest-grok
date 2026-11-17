@@ -36,8 +36,9 @@ if [ ! -f "$MANIFEST" ]; then
   exit 1
 fi
 
+# manifest_value KEY [FILE] (default: this plugin's manifest)
 manifest_value() {
-  sed -n "s/^[[:space:]]*\"$1\":[[:space:]]*\"\{0,1\}\([^\",$]*\)\"\{0,1\},\{0,1\}$/\1/p" "$MANIFEST" | head -1
+  sed -n "s/^[[:space:]]*\"$1\":[[:space:]]*\"\{0,1\}\([^\",$]*\)\"\{0,1\},\{0,1\}$/\1/p" "${2:-$MANIFEST}" | head -1
 }
 
 # Top-level fields
@@ -45,8 +46,9 @@ VERSION=$(manifest_value "version")
 REPO=$(manifest_value "repo")
 
 # Per-platform fields: extract the block for our platform, then read keys
+# platform_value KEY [FILE] (default: this plugin's manifest)
 platform_value() {
-  sed -n "/\"${PLATFORM}\":/,/}/p" "$MANIFEST" | sed -n "s/^[[:space:]]*\"$1\":[[:space:]]*\"\{0,1\}\([^\",$]*\)\"\{0,1\},\{0,1\}$/\1/p" | head -1
+  sed -n "/\"${PLATFORM}\":/,/}/p" "${2:-$MANIFEST}" | sed -n "s/^[[:space:]]*\"$1\":[[:space:]]*\"\{0,1\}\([^\",$]*\)\"\{0,1\},\{0,1\}$/\1/p" | head -1
 }
 
 ASSET_FILE=$(platform_value "file")
@@ -58,12 +60,60 @@ if [ -z "$VERSION" ] || [ -z "$ASSET_FILE" ] || [ -z "$EXPECTED_SHA" ]; then
   exit 1
 fi
 
+# ── Integrity ───────────────────────────────────────────────────────
+# Every binary is re-hashed right before it runs, not only after a download: a cached,
+# fallback or sibling binary that does not match its manifest's sha256 never runs.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
+elif command -v shasum >/dev/null 2>&1; then
+  sha256_of() { shasum -a 256 "$1" | cut -d' ' -f1; }
+else
+  echo "Zest: no sha256 tool available. Set ZEST_BINARY_PATH for manual install." >&2
+  exit 1
+fi
+
+# matches_sha FILE EXPECTED: true only when both are there and the hashes agree.
+matches_sha() {
+  [ -n "$2" ] && [ -f "$1" ] && [ "$(sha256_of "$1")" = "$2" ]
+}
+
+# A verified binary keeps its manifest's hash beside it (<bin>.sha256), so it can still be
+# checked once a plugin update makes it the fallback and its manifest is gone.
+remember_sha() {
+  [ "$(cat "$1.sha256" 2>/dev/null)" = "$2" ] || { printf '%s\n' "$2" > "$1.sha256"; } 2>/dev/null || true
+}
+
+# expected_sha VERSION BIN: the sha256 a cached binary of VERSION must have. Its
+# remembered hash, else the manifest of that version in a sibling plugin folder.
+expected_sha() {
+  if [ -f "$2.sha256" ]; then
+    cat "$2.sha256"
+    return 0
+  fi
+  _m="$DIR/../../$1/bin/manifest.json"
+  [ -f "$_m" ] && [ "$(manifest_value "version" "$_m")" = "$1" ] && platform_value "sha256" "$_m"
+  return 0
+}
+
 # ── Cache check ─────────────────────────────────────────────────────
 CACHE_BASE="${HOME}/.zest/bin/grok"
 CACHE_DIR="${CACHE_BASE}/${VERSION}"
 CACHED_BIN="${CACHE_DIR}/${BIN_NAME}"
 
-if [ -x "$CACHED_BIN" ]; then
+# verify_cached: true when the pinned binary is cached and matches the manifest. A cached
+# binary that does not match is removed, so the rest of the script downloads or falls back.
+verify_cached() {
+  [ -x "$CACHED_BIN" ] || return 1
+  if matches_sha "$CACHED_BIN" "$EXPECTED_SHA"; then
+    remember_sha "$CACHED_BIN" "$EXPECTED_SHA"
+    return 0
+  fi
+  echo "Zest: cached runtime v${VERSION} failed its integrity check; removing it" >&2
+  rm -f "$CACHED_BIN" "$CACHED_BIN.sha256"
+  return 1
+}
+
+if verify_cached; then
   unset ZEST_PINNED_VERSION
   export ZEST_PLUGIN_ROOT="$(dirname "$DIR")"
   exec "$CACHED_BIN" "$@"
@@ -110,6 +160,7 @@ find_fallback_binary() {
     CANDIDATE="${dpath}${BIN_NAME}"
     if [ -x "$CANDIDATE" ]; then
       if [ -z "$BEST_VER" ] || ver_gt "$d" "$BEST_VER"; then
+        matches_sha "$CANDIDATE" "$(expected_sha "$d" "$CANDIDATE")" || continue
         BEST_VER="$d"
         BEST_PATH="$CANDIDATE"
       fi
@@ -129,8 +180,8 @@ try_fallback_exec() {
   }
   # Sibling-version fallback: one-release bridge for hosts transitioning
   # from tip-binary to release-binary. Scans sibling plugin-version dirs
-  # for a binary with exact name $BIN_NAME. No sha256 — warrant is same
-  # trust path (git clone of our mirror). Claude Code retains ~3 recent
+  # for a binary with exact name $BIN_NAME that matches the sha256 in the
+  # manifest.json beside it (none or no match: skipped). Claude Code retains ~3 recent
   # plugin versions and prunes older ones within a day; sibling fallback
   # therefore bridges ~3 releases. Remove after all clients ship release-binary.
   # Use find (not an unquoted glob) so plugin cache paths with spaces survive.
@@ -145,6 +196,9 @@ try_fallback_exec() {
         sver=$(basename "$(dirname "$(dirname "$sibling")")")
         case "$sver" in *[!0-9.]*) continue ;; esac
         if [ -z "$BEST_SIBLING_VER" ] || ver_gt "$sver" "$BEST_SIBLING_VER"; then
+          sdir=$(dirname "$sibling")
+          [ -f "$sdir/manifest.json" ] || continue
+          matches_sha "$sibling" "$(platform_value "sha256" "$sdir/manifest.json")" || continue
           BEST_SIBLING_VER="$sver"
           BEST_SIBLING="$sibling"
         fi
@@ -221,7 +275,7 @@ echo $$ > "$LOCK_DIR/pid"
 LOCK_HELD=true
 
 # Re-check cache (another process may have finished)
-if [ -x "$CACHED_BIN" ]; then
+if verify_cached; then
   rm -rf "$LOCK_DIR" 2>/dev/null || true
   LOCK_HELD=false
   trap - EXIT INT TERM
@@ -232,10 +286,19 @@ fi
 
 # ── Download ────────────────────────────────────────────────────────
 # ZEST_DOWNLOAD_BASE_URL: override for air-gapped or locked-down environments.
-# Point it at any HTTP server that hosts the release assets at the root, e.g.
-#   ZEST_DOWNLOAD_BASE_URL=http://internal-mirror:8080
-# downloads from http://internal-mirror:8080/zest-grok-darwin-arm64.gz
+# Point it at any HTTPS server that hosts the release assets at the root, e.g.
+#   ZEST_DOWNLOAD_BASE_URL=https://internal-mirror:8443
+# downloads from https://internal-mirror:8443/zest-grok-darwin-arm64.gz
+# Plain http is refused: the binary and its sha256 check would both be open to the network.
 if [ -n "${ZEST_DOWNLOAD_BASE_URL:-}" ]; then
+  case "$ZEST_DOWNLOAD_BASE_URL" in
+    https://*) ;;
+    *)
+      echo "Zest: ZEST_DOWNLOAD_BASE_URL must start with https://" >&2
+      release_before_fallback
+      try_fallback_exec "$@" || exit 1
+      ;;
+  esac
   URL="${ZEST_DOWNLOAD_BASE_URL}/${ASSET_FILE}"
 else
   URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ASSET_FILE}"
@@ -248,7 +311,8 @@ fi
 echo "Zest: downloading runtime v${VERSION} (${DOWNLOAD_MB:-?} MB, one time)"
 
 TEMP_DL="${CACHE_DIR}/.download.$$"
-if ! curl -fsSL --retry 2 --retry-delay 2 --connect-timeout 10 --max-time 300 -o "$TEMP_DL" "$URL"; then
+# --proto =https: no redirect may downgrade the download to http.
+if ! curl -fsSL --proto '=https' --retry 2 --retry-delay 2 --connect-timeout 10 --max-time 300 -o "$TEMP_DL" "$URL"; then
   echo "Zest: download failed. Check network or set ZEST_BINARY_PATH for manual install." >&2
   release_before_fallback
   try_fallback_exec "$@" || exit 1
@@ -264,17 +328,7 @@ fi
 rm -f "$TEMP_DL"
 
 # ── Verify SHA256 ───────────────────────────────────────────────────
-if command -v sha256sum >/dev/null 2>&1; then
-  ACTUAL_SHA=$(sha256sum "$TEMP_BIN" | cut -d' ' -f1)
-elif command -v shasum >/dev/null 2>&1; then
-  ACTUAL_SHA=$(shasum -a 256 "$TEMP_BIN" | cut -d' ' -f1)
-else
-  echo "Zest: no sha256 tool available. Set ZEST_BINARY_PATH for manual install." >&2
-  rm -f "$TEMP_BIN"
-  release_before_fallback
-  try_fallback_exec "$@" || exit 1
-fi
-
+ACTUAL_SHA=$(sha256_of "$TEMP_BIN")
 if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
   echo "Zest: integrity check failed" >&2
   echo "  expected: $EXPECTED_SHA" >&2
@@ -285,8 +339,10 @@ if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
 fi
 
 # ── Atomic rename ───────────────────────────────────────────────────
+# The exec below runs this same file, hashed just above.
 mv "$TEMP_BIN" "$CACHED_BIN"
 chmod +x "$CACHED_BIN"
+remember_sha "$CACHED_BIN" "$EXPECTED_SHA"
 
 # ── GC (best-effort) ───────────────────────────────────────────────
 # Keep the pinned version (just downloaded) and the newest other version
