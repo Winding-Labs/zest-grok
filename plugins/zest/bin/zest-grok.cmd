@@ -4,6 +4,8 @@ rem sits outside ( ) blocks, where %errorlevel% is read after the command, not w
 setlocal DisableDelayedExpansion
 
 set "DIR=%~dp0"
+rem This file, for :fetch_in_background (inside a called label %~f0 names the label, not the file).
+set "ZEST_LAUNCHER=%~f0"
 set "PLATFORM=win-x64"
 set "BIN_NAME=zest-grok-win-x64.exe"
 
@@ -56,6 +58,7 @@ call :try_fallback %*
 if defined FALLBACK_FOUND exit /b %errorlevel%
 
 if /i "%VERB%"=="hook" (
+  call :fetch_in_background
   echo {"status":"binary_not_cached","version":"%VERSION%"} >&2
   exit /b 0
 )
@@ -335,4 +338,14 @@ if %_A1% lss %_B1% exit /b 0
 if %_A2% gtr %_B2% (set "VER_RESULT=1" & exit /b 0)
 if %_A2% lss %_B2% exit /b 0
 if %_A3% gtr %_B3% set "VER_RESULT=1"
+exit /b 0
+
+:fetch_in_background
+rem No runtime at all for a hook: the installer's one fetch failed (offline, a proxy, its timeout), or
+rem the plugin was installed by hand and no /zest: command ever ran. A hook can't wait for the download,
+rem so it starts in the background, hidden and on its own (Start-Process), one at a time (the download
+rem lock), and the next hook runs on it. Until 2026-11-24 such a hook only said binary_not_cached: every
+rem session on that computer was lost, and nothing reached the server to say so.
+if exist "%CACHE_DIR%\.download-lock" exit /b 0
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath $env:ZEST_LAUNCHER -ArgumentList 'command','status' -WindowStyle Hidden } catch { exit 0 }" >nul 2>&1
 exit /b 0

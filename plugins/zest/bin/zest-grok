@@ -6,6 +6,12 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 # ── Platform detection ──────────────────────────────────────────────
 OS=$(uname -s)
 ARCH=$(uname -m)
+# Apple Silicon under Rosetta (an x86_64 terminal or host) reports x86_64. Take arm64 there, as Claude Code's own
+# installer does: otherwise a Rosetta shell caches the x64 runtime while the native agent's hooks look for the arm64
+# one, find none and skip every session (Mac e2e, 2026-11-24). An arm64-only binary runs native from any parent.
+if [ "${OS}-${ARCH}" = "Darwin-x86_64" ] && [ "$(/usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null)" = "1" ]; then
+  ARCH=arm64
+fi
 
 case "${OS}-${ARCH}" in
   Darwin-arm64)    PLATFORM="darwin-arm64";  BIN_NAME="zest-grok-darwin-arm64" ;;
@@ -215,10 +221,23 @@ EOF
   return 1
 }
 
+# No runtime at all for a hook: the installer's one fetch failed (offline, a proxy, its 180 s
+# timeout), or the plugin was installed by hand and no /zest: command ever ran. A hook can't wait for
+# a ~30 MB download, so start it in the background, one at a time (the download lock), and the next
+# hook runs on it. `set -m` gives it its own process group, so it outlives the hook. Until 2026-11-24
+# such a hook only said binary_not_cached, to a log nobody reads: every session on that computer
+# was lost, and nothing reached the server to say so.
+fetch_in_background() {
+  [ "$VERB" = "hook" ] || return 0
+  [ -d "${CACHE_DIR}/.download-lock" ] && return 0
+  (set -m; "$DIR/zest-grok" command status </dev/null >/dev/null 2>&1 &) 2>/dev/null || true
+}
+
 case "$VERB" in
   command) ;; # proceed to download
   *)
     try_fallback_exec "$@" || {
+      fetch_in_background
       echo '{"status":"binary_not_cached","version":"'"$VERSION"'"}' >&2
       case "$VERB" in daemon) exit 1 ;; *) exit 0 ;; esac
     }
