@@ -53,12 +53,20 @@ rem ── Download allowlist with fallback to previous cached version
 set "VERB=%~1"
 if /i "%VERB%"=="command" goto :do_download
 
+rem A plugin update brings a new manifest and no runtime for it. A session start fetches it in the background and
+rem runs the previous runtime meanwhile, so the next session runs the new one. Until 2026-11-27 only a /zest:
+rem command fetched it, and an updated plugin ran its old runtime for good.
+set "FETCHING="
+if /i "%VERB%"=="hook" if /i "%~2"=="session-start" set "FETCHING=1"
+if /i "%VERB%"=="hook" if /i "%~2"=="SessionStart" set "FETCHING=1"
+if defined FETCHING call :fetch_in_background
+
 rem Non-download verbs: try cached/sibling fallback
 call :try_fallback %*
 if defined FALLBACK_FOUND exit /b %errorlevel%
 
 if /i "%VERB%"=="hook" (
-  call :fetch_in_background
+  if not defined FETCHING call :fetch_in_background
   echo {"status":"binary_not_cached","version":"%VERSION%"} >&2
   exit /b 0
 )

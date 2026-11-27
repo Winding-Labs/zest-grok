@@ -236,8 +236,13 @@ fetch_in_background() {
 case "$VERB" in
   command) ;; # proceed to download
   *)
+    # A plugin update brings a new manifest and no runtime for it. A session start fetches it in the background
+    # and runs the previous runtime meanwhile, so the next session runs the new one. Until 2026-11-27 only a
+    # /zest: command fetched it, and an updated plugin ran its old runtime for good.
+    FETCHING=""
+    case "${2:-}" in session-start | SessionStart) fetch_in_background; FETCHING=1 ;; esac
     try_fallback_exec "$@" || {
-      fetch_in_background
+      [ -n "$FETCHING" ] || fetch_in_background
       echo '{"status":"binary_not_cached","version":"'"$VERSION"'"}' >&2
       case "$VERB" in daemon) exit 1 ;; *) exit 0 ;; esac
     }

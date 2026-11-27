@@ -10,6 +10,10 @@ analytics, and a picture of how your team actually works across every AI tool.
 
 Then run `/zest-login` inside a Grok session.
 
+Zest updates itself: while Grok runs, Zest checks for a new release hourly
+and runs `grok plugin update zest` (one try a day), and the next session
+runs the new version (`ZEST_NO_AUTO_UPDATE=1` turns that off).
+
 Full instructions: https://meetzest.com/docs/plugins/grok-build/?utm_source=github.com&utm_medium=referral&utm_campaign=plugin-readme
 
 ## What it captures
